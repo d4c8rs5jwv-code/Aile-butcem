@@ -1,0 +1,268 @@
+
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Aile Bütçem</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f0f4f8;color:#172b42;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+main{max-width:650px;margin:auto;padding:20px}
+h1{text-align:center}
+.card{background:white;padding:20px;border-radius:18px;margin-bottom:16px;box-shadow:0 4px 15px #00000009}
+.balance{background:#142d4e;color:white;text-align:center}
+.balance h2{font-size:36px;margin:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.income{color:#15803d}
+.expense{color:#dc2626}
+input,select,button{width:100%;padding:13px;margin:6px 0;border:1px solid #dbe2ea;border-radius:10px;font-size:16px}
+button{background:#1765d1;color:white;border:0;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.5}
+.small{width:auto;padding:8px 12px}
+.delete{background:#dc2626}
+.row{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #eee;padding:12px 0;gap:8px}
+.muted{color:#64748b;font-size:13px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>🏠 Aile Bütçem</h1>
+<p id="status" role="status"></p>
+
+<section id="login" class="card">
+<h2>Giriş yap</h2>
+<form id="loginForm">
+<input id="email" type="email" placeholder="E-posta" required>
+<input id="password" type="password" placeholder="Şifre" required>
+<button>Giriş yap</button>
+</form>
+</section>
+
+<section id="dashboard" hidden>
+<button id="logout" class="small">Çıkış yap</button>
+<input id="month" type="month">
+
+<div class="card balance">
+Kalan bakiye
+<h2 id="balance">0,00 €</h2>
+</div>
+
+<div class="grid">
+<div class="card">
+Toplam gelir
+<h2 id="income" class="income">0 €</h2>
+</div>
+<div class="card">
+Toplam gider
+<h2 id="expense" class="expense">0 €</h2>
+</div>
+</div>
+
+<div class="card">
+<h2>Yeni işlem ekle</h2>
+<form id="entryForm">
+<select id="type">
+<option value="income">Gelir</option>
+<option value="expense">Gider</option>
+</select>
+<select id="category">
+<option>Maaş</option>
+<option>Ek gelir</option>
+<option>Market</option>
+<option>Elektrik</option>
+<option>Su</option>
+<option>Isınma / Mazot</option>
+<option>Kira / Kredi</option>
+<option>Telefon / İnternet</option>
+<option>Araba / Yakıt</option>
+<option>Sigorta</option>
+<option>Çocuklar</option>
+<option>Sağlık</option>
+<option>Alışveriş</option>
+<option>Diğer</option>
+</select>
+<input id="amount" type="number" min="0.01" step="0.01" placeholder="Tutar (€)" required>
+<input id="date" type="date" required>
+<input id="note" placeholder="Açıklama (isteğe bağlı)" maxlength="200">
+<button id="save">Kaydet</button>
+</form>
+</div>
+
+<div class="card">
+<h2>İşlem geçmişi</h2>
+<div id="history"></div>
+</div>
+</section>
+</main>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js";
+
+const firebaseConfig = {
+apiKey: "AIzaSyDelwfmcGO0zblc41B66z9P_U1F0dNzLO4",
+authDomain: "aile-butcem-b4c75.firebaseapp.com",
+projectId: "aile-butcem-b4c75",
+storageBucket: "aile-butcem-b4c75.firebasestorage.app",
+messagingSenderId: "317318051898",
+appId: "1:317318051898:web:b9816cff0881ebacaa1d03"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = id => document.getElementById(id);
+const money = n => new Intl.NumberFormat("tr-TR", {
+style:"currency", currency:"EUR"
+}).format(n / 100);
+
+let entries = [];
+let unsubscribe = null;
+
+const now = new Date();
+const today = now.getFullYear() + "-" +
+String(now.getMonth()+1).padStart(2,"0") + "-" +
+String(now.getDate()).padStart(2,"0");
+
+$("date").value = today;
+$("month").value = today.slice(0,7);
+
+function status(message){
+$("status").textContent = message;
+}
+
+$("loginForm").onsubmit = async e => {
+e.preventDefault();
+try {
+await signInWithEmailAndPassword(
+auth,$("email").value,$("password").value
+);
+$("password").value="";
+} catch(error){
+status("Giriş yapılamadı. E-posta ve şifrenizi kontrol edin.");
+}
+};
+
+$("logout").onclick = async () => {
+await signOut(auth);
+};
+
+onAuthStateChanged(auth,user=>{
+if(unsubscribe) unsubscribe();
+entries=[];
+$("history").replaceChildren();
+$("login").hidden=!!user;
+$("dashboard").hidden=!user;
+
+if(user){
+status("Bütçe yükleniyor...");
+unsubscribe=onSnapshot(
+collection(db,"transactions"),
+snapshot=>{
+entries=snapshot.docs.map(d=>({...d.data(),id:d.id}));
+render();
+status(snapshot.metadata.fromCache ?
+"Çevrimdışı kayıtlar gösteriliyor." :
+"Bütçeniz güncel.");
+},
+error=>status("Veritabanı bağlantı hatası: "+error.code)
+);
+}else{
+status("");
+}
+});
+
+$("entryForm").onsubmit=async e=>{
+e.preventDefault();
+if(!auth.currentUser)return;
+const cents=Math.round(Number($("amount").value)*100);
+if(!Number.isSafeInteger(cents)||cents<=0)return;
+
+$("save").disabled=true;
+try{
+await addDoc(collection(db,"transactions"),{
+type:$("type").value,
+category:$("category").value,
+amount:cents,
+date:$("date").value,
+note:$("note").value.trim(),
+createdAt:serverTimestamp()
+});
+$("month").value=$("date").value.slice(0,7);
+$("amount").value="";
+$("note").value="";
+render();
+}catch(error){
+status("Kayıt başarısız: "+error.code);
+}finally{
+$("save").disabled=false;
+}
+};
+
+$("month").onchange=render;
+
+function render(){
+const selected=entries.filter(x=>
+typeof x.date==="string" &&
+x.date.startsWith($("month").value)
+);
+
+const income=selected.filter(x=>x.type==="income")
+.reduce((s,x)=>s+x.amount,0);
+
+const expense=selected.filter(x=>x.type==="expense")
+.reduce((s,x)=>s+x.amount,0);
+
+$("income").textContent=money(income);
+$("expense").textContent=money(expense);
+$("balance").textContent=money(income-expense);
+
+const history=$("history");
+history.replaceChildren();
+
+selected.sort((a,b)=>b.date.localeCompare(a.date));
+
+if(!selected.length){
+history.textContent="Bu ay henüz işlem yok.";
+}
+
+selected.forEach(x=>{
+const row=document.createElement("div");
+row.className="row";
+
+const info=document.createElement("div");
+const title=document.createElement("strong");
+title.textContent=x.category;
+const detail=document.createElement("div");
+detail.className="muted";
+detail.textContent=x.date+" · "+(x.note||"");
+info.append(title,detail);
+
+const price=document.createElement("strong");
+price.className=x.type==="income"?"income":"expense";
+price.textContent=(x.type==="income"?"+":"−")+money(x.amount);
+
+const del=document.createElement("button");
+del.className="small delete";
+del.textContent="Sil";
+del.onclick=async()=>{
+if(confirm("Bu işlemi silmek istiyor musunuz?")){
+try{
+await deleteDoc(doc(db,"transactions",x.id));
+}catch(error){
+status("İşlem silinemedi.");
+}
+}
+};
+
+row.append(info,price,del);
+history.append(row);
+});
+}
+</script>
+</body>
+</html>
